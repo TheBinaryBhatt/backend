@@ -205,14 +205,25 @@ async def login(
     db: AsyncSession = Depends(get_db),
 ):
     try:
+        logger.info(f"Login attempt for user: {form_data.username}")
+        
+        # Execute query
         result = await db.execute(select(User).where(User.username == form_data.username))
         user = result.scalar_one_or_none()
 
-        if not user or not verify_password(form_data.password, user.password_hash):
+        if not user:
+            logger.warning(f"Login failed: User {form_data.username} not found")
+            publish_event("security.login.failure", {"username": form_data.username})
+            raise HTTPException(status_code=400, detail="Incorrect username or password")
+
+        # Verify password
+        if not verify_password(form_data.password, user.password_hash):
+            logger.warning(f"Login failed: Invalid password for user {form_data.username}")
             publish_event("security.login.failure", {"username": form_data.username})
             raise HTTPException(status_code=400, detail="Incorrect username or password")
 
         if not user.is_active:
+            logger.warning(f"Login failed: User {form_data.username} is inactive")
             raise HTTPException(status_code=400, detail="Inactive user")
 
         access_token = create_access_token(
@@ -221,10 +232,13 @@ async def login(
         )
 
         publish_event("security.login.success", {"username": user.username})
+        logger.info(f"Login successful for user: {form_data.username}")
         return {"access_token": access_token, "token_type": "bearer"}
 
-    except Exception:
-        logger.exception("[gateway] Login error")
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception(f"[gateway] Unexpected login error: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
 
 
@@ -236,7 +250,7 @@ async def read_users_me(current_user: User = Depends(get_current_active_user)):
     return _serialize_user(current_user)
 
 
-analyst_or_admin = roles_required("admin", "analyst", "auditor", "viewer")
+analyst_or_admin = roles_required("admin", "analyst")
 
 
 @app.get("/api/v1/users", dependencies=[Depends(roles_required("admin"))])
@@ -357,14 +371,37 @@ async def siem_webhook(request: Request):
 @app.post("/api/v1/incidents/{incident_id}/respond")
 async def respond_to_incident(
     incident_id: str,
-    current_user: User = Depends(roles_required("admin")),
+    request: Request,
+    current_user: User = Depends(analyst_or_admin),
 ):
+    auth_header = request.headers.get("Authorization")
+    headers = {}
+    if auth_header:
+        headers["Authorization"] = auth_header
+
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+
     async with httpx.AsyncClient() as client:
         try:
-            resp = await client.post(f"{RESPONSE_SERVICE}/api/v1/incidents/{incident_id}/respond")
-            return resp.json()
+            resp = await client.post(
+                f"{RESPONSE_SERVICE}/api/v1/incidents/{incident_id}/respond",
+                headers=headers,
+                json=body,
+            )
+
+            # Correctly forward non-JSON responses
+            try:
+                return resp.json()
+            except Exception:
+                return {"status": "error", "detail": resp.text}
+
         except httpx.RequestError:
             raise HTTPException(status_code=502, detail="Response service unavailable")
+
+
 
 
 # -------------------------------------------------

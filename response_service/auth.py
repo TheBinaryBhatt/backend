@@ -7,6 +7,7 @@ from passlib.context import CryptContext
 from datetime import datetime, timedelta
 from core.config import settings
 import logging
+from core.models import User
 
 logger = logging.getLogger(__name__)
 
@@ -25,13 +26,25 @@ oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/token")
 # Dummy user -- replace with DB-backed user store in production
 def _make_fake_user_db():
     # hashing here is fine for local dev, but not used in production
-    return {
+        return {
         "admin": {
             "username": "admin",
             # keep a stable hashed password for process lifetime
-            "hashed_password": pwd_context.hash("password")
-        }
+            "hashed_password": pwd_context.hash("password"),
+            "role": "admin",
+        },
+        "analyst": {
+            "username": "analyst",
+            "hashed_password": pwd_context.hash("password"),
+            "role": "analyst",
+        },
+        "viewer": {
+            "username": "viewer",
+            "hashed_password": pwd_context.hash("password"),
+            "role": "viewer",
+        },
     }
+
 
 fake_user_db = _make_fake_user_db()
 
@@ -79,10 +92,19 @@ async def get_current_user(token: str = Depends(oauth2_scheme)) -> Dict[str, Any
         username: Optional[str] = payload.get("sub")
         if username is None:
             raise credentials_exception
+        
+        # FIX: Get user from fake database
         user = fake_user_db.get(username)
         if user is None:
             raise credentials_exception
+            
+        # FIX: Return the full user dict including username
+        return {
+            "username": user.get("username"),
+            "role": user.get("role"),
+            "id": username  # Use username as ID if no UUID
+        }
+        
     except JWTError as e:
         logger.debug("JWT decode error: %s", e)
         raise credentials_exception
-    return user
